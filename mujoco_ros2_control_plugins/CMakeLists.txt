@@ -52,6 +52,7 @@ add_library(mujoco_ros2_control_plugins_impl SHARED
   src/free_joint_state_publisher_plugin.cpp
   src/fts_grav_comp_plugin.cpp
   src/camera_plugin.cpp
+  src/imu_plugin.cpp
   src/mujoco_3d_lidar_plugin.cpp
   # TODO: Remove once this has been fully deprecated
   src/rangefinder_lidar_plugin.cpp

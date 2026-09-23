@@ -143,7 +143,7 @@ public:
    * running headless). It also sets up required publishers and services using the provided node.
    */
   bool initialize(rclcpp::Node::SharedPtr node, const std::string& model_path, const std::string& mujoco_model_topic,
-                  double sim_speed_factor, bool headless);
+                  double sim_speed_factor, double render_fps, bool headless);
 
   /**
    * @brief Apply a keyframe to the simulation by name.
@@ -523,6 +523,10 @@ private:
   // attempt to loop at whatever this is set to. If this is <0, then we use the value from the app.
   double sim_speed_factor_{ -1.0 };
 
+  // Native onscreen render cap. Zero disables pacing; it never affects physics
+  // or offscreen sensor rendering.
+  double render_fps_{ 0.0 };
+
   // True when running without a display (no GLFW window)
   bool headless_{ false };
 
@@ -532,6 +536,8 @@ private:
   // Threads for rendering physics and the UI simulation
   std::thread physics_thread_;
   std::thread ui_thread_;
+  std::atomic<bool> physics_thread_started_{ false };
+  std::atomic<bool> physics_thread_stopped_{ true };
   // Distinguishes a programmatic RenderLoop wakeup from the user closing its window.
   std::atomic<bool> explicit_shutdown_requested_{ false };
 

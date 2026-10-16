@@ -24,6 +24,7 @@
 #include <fmt/ranges.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -328,6 +329,16 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
   const double sim_speed_factor =
       std::stod(get_hardware_parameter(get_hardware_info(), "sim_speed_factor").value_or("-1"));
 
+  // Native onscreen render cap. Zero keeps the UI uncapped and never affects
+  // the physics clock or offscreen camera rendering.
+  const double render_fps =
+      std::stod(get_hardware_parameter(get_hardware_info(), "render_fps").value_or("0"));
+  if (!std::isfinite(render_fps) || render_fps < 0.0 || render_fps > 1000.0)
+  {
+    RCLCPP_FATAL(get_logger(), "Hardware parameter 'render_fps' must be between 0 and 1000 FPS.");
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
   // Check for headless mode
   const bool headless =
       hardware_interface::parse_bool(get_hardware_parameter(get_hardware_info(), "headless").value_or("false"));
@@ -372,7 +383,7 @@ MujocoSystemInterface::on_init(const hardware_interface::HardwareComponentInterf
 
   // Construct the simulation wrapper with the loaded parameters.
   simulation_ = std::make_unique<MujocoSimulation>();
-  if (!simulation_->initialize(get_node(), model_path, mujoco_model_topic, sim_speed_factor, headless))
+  if (!simulation_->initialize(get_node(), model_path, mujoco_model_topic, sim_speed_factor, render_fps, headless))
   {
     return hardware_interface::CallbackReturn::ERROR;
   }

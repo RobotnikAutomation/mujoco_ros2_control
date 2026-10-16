@@ -52,6 +52,13 @@ set(MUJOCO_SIMULATE_DIR "${MUJOCO_ROOT}/simulate")
 if(NOT EXISTS "${MUJOCO_SIMULATE_DIR}/simulate.h")
   set(MUJOCO_SIMULATE_DIR "${MUJOCO_ROOT}/include/simulate")
 endif()
+set(MUJOCO_SIMULATE_SOURCE "${MUJOCO_SIMULATE_DIR}/simulate.cc")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/vendor/simulate.cc")
+  # Keep the vendor headers and adapters, but use the local source copy so the
+  # ROS integration can add benchmark-only render pacing without modifying the
+  # system-installed mujoco_vendor package.
+  set(MUJOCO_SIMULATE_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/vendor/simulate.cc")
+endif()
 # So downstream packages that include our headers can find glfw_adapter.h etc.
 set(MUJOCO_INSTALL_INCLUDE_DIR "${MUJOCO_INCLUDE_DIR}")
 set(MUJOCO_INSTALL_SIMULATE_DIR "${MUJOCO_SIMULATE_DIR}")
@@ -137,7 +144,7 @@ else()
   )
   target_sources(mujoco_simulate
     PRIVATE ${MUJOCO_SIMULATE_DIR}/simulate.h
-    PRIVATE ${MUJOCO_SIMULATE_DIR}/simulate.cc ${MUJOCO_SIMULATE_DIR}/array_safety.h
+    PRIVATE ${MUJOCO_SIMULATE_SOURCE} ${MUJOCO_SIMULATE_DIR}/array_safety.h
   )
   target_include_directories(mujoco_simulate PUBLIC ${MUJOCO_SIMULATE_DIR} ${MUJOCO_INCLUDE_DIR})
   target_link_libraries(mujoco_simulate PRIVATE lodepng mujoco::platform_ui_adapter ${MUJOCO_LIB})

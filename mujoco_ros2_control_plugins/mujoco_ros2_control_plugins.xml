@@ -57,6 +57,13 @@
       will have their data copied and published whenever it becomes available.
     </description>
   </class>
+  <class name="mujoco_ros2_control_plugins/ImuPlugin"
+         type="mujoco_ros2_control_plugins::ImuPlugin"
+         base_class_type="mujoco_ros2_control_plugins::MuJoCoROS2ControlPluginBase">
+    <description>
+      Publishes one MuJoCo framequat/gyro/accelerometer sensor triplet as sensor_msgs/Imu.
+    </description>
+  </class>
   <class name="mujoco_ros2_control_plugins/BaseVelocityPlugin"
          type="mujoco_ros2_control_plugins::BaseVelocityPlugin"
          base_class_type="mujoco_ros2_control_plugins::MuJoCoROS2ControlPluginBase">

@@ -23,6 +23,7 @@
 #include "render_loop_exit.hpp"
 
 #include <unistd.h>
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -194,8 +195,37 @@ public:
 class ROS2ControlGlfwAdapter : public mj::GlfwAdapter
 {
 public:
-  explicit ROS2ControlGlfwAdapter(std::atomic<bool>& step_requested) : step_requested_(step_requested)
+  ROS2ControlGlfwAdapter(std::atomic<bool>& step_requested, double render_fps)
+  : step_requested_(step_requested),
+    swap_period_(render_fps > 0.0 ? std::chrono::duration<double>(1.0 / render_fps)
+                                  : std::chrono::duration<double>::zero()),
+    next_swap_(std::chrono::steady_clock::now())
   {
+  }
+
+  void SwapBuffers() override
+  {
+    if (swap_period_.count() > 0.0)
+    {
+      const auto now = std::chrono::steady_clock::now();
+      if (next_swap_ > now)
+      {
+        std::this_thread::sleep_until(next_swap_);
+      }
+      mj::GlfwAdapter::SwapBuffers();
+
+      // Preserve the requested cadence when a frame is on time, but never
+      // try to "catch up" with an immediate second presentation after a slow
+      // frame. The old recovery set next_swap_ to now, so a late frame caused
+      // the following SwapBuffers() to run uncapped. That is especially
+      // visible with two or three robots as intermittent FPS spikes.
+      const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(swap_period_);
+      const auto completed = std::chrono::steady_clock::now();
+      next_swap_ = std::max(next_swap_ + period, completed + period);
+      return;
+    }
+
+    mj::GlfwAdapter::SwapBuffers();
   }
 
 protected:
@@ -218,6 +248,8 @@ protected:
 
 private:
   std::atomic<bool>& step_requested_;
+  std::chrono::duration<double> swap_period_;
+  std::chrono::steady_clock::time_point next_swap_;
 };
 
 // return the path to the directory containing the current executable
@@ -508,6 +540,12 @@ MujocoSimulation::~MujocoSimulation()
 {
   shutdown();
 
+  // The interactive Simulate object owns an OpenGL context whose destructor
+  // still references the attached model/data. Destroy it before releasing the
+  // MuJoCo objects; doing this in the opposite order can crash libGLdispatch
+  // during GUI shutdown.
+  sim_.reset();
+
   // Cleanup data and the model, if they haven't been
   if (mj_data_)
   {
@@ -527,13 +565,15 @@ MujocoSimulation::~MujocoSimulation()
 }
 
 bool MujocoSimulation::initialize(rclcpp::Node::SharedPtr node, const std::string& model_path,
-                                  const std::string& mujoco_model_topic, double sim_speed_factor, bool headless)
+                                  const std::string& mujoco_model_topic, double sim_speed_factor, double render_fps,
+                                  bool headless)
 {
   explicit_shutdown_requested_.store(false);
   node_ = node;
   model_path_ = model_path;
   mujoco_model_topic_ = mujoco_model_topic;
   sim_speed_factor_ = sim_speed_factor;
+  render_fps_ = render_fps;
   headless_ = headless;
 
   if (sim_speed_factor_ > 0)
@@ -580,9 +620,18 @@ bool MujocoSimulation::initialize(rclcpp::Node::SharedPtr node, const std::strin
   {
     // Launch the UI loop in the background
     ui_thread_ = std::thread([this, sim_ready]() {
-      sim_ = std::make_unique<mj::Simulate>(std::make_unique<ROS2ControlGlfwAdapter>(keyboard_step_requested_), &cam_,
-                                            &opt_, &pert_,
+      sim_ = std::make_unique<mj::Simulate>(
+          std::make_unique<ROS2ControlGlfwAdapter>(keyboard_step_requested_, render_fps_), &cam_, &opt_, &pert_,
                                             /* is_passive = */ false);
+      // ``refresh_rate`` controls how long the physics loop may hold the
+      // simulation mutex while batching steps.  It is not a render setting:
+      // tying it to render_fps (and especially setting it to zero when the UI
+      // is uncapped) changes RTF and can divide by zero in the physics loop.
+      // Keep MuJoCo's default refresh cadence independent of the UI cap.
+      if (render_fps_ > 0.0)
+      {
+        RCLCPP_INFO(get_logger(), "Capping native MuJoCo window render to %.2f FPS", render_fps_);
+      }
 
       // Add ros2 control icon for the taskbar
 #if AMENT_INDEX_CPP_VERSION_GTE(1, 13, 2)
@@ -631,6 +680,15 @@ bool MujocoSimulation::initialize(rclcpp::Node::SharedPtr node, const std::strin
       {
         RCLCPP_INFO(get_logger(), "MuJoCo rendering window closed; shut down its ROS context.");
       }
+
+      // GLFW contexts must be destroyed on the thread which created them.
+      // Wait until physics no longer touches Simulate, then release the viewer
+      // here rather than later from the controller-manager thread.
+      while (physics_thread_started_.load() && !physics_thread_stopped_.load())
+      {
+        std::this_thread::sleep_for(1ms);
+      }
+      sim_.reset();
     });
   }
 
@@ -794,6 +852,8 @@ void MujocoSimulation::start_physics_thread()
   }
 
   // When the interface is activated, we start the physics engine.
+  physics_thread_stopped_.store(false);
+  physics_thread_started_.store(true);
   physics_thread_ = std::thread([this]() {
     // Load the simulation and do an initial forward pass
     RCLCPP_INFO(get_logger(), "Starting the MuJoCo physics thread...");
@@ -815,6 +875,7 @@ void MujocoSimulation::start_physics_thread()
     }
     // Blocks until terminated
     physics_loop();
+    physics_thread_stopped_.store(true);
   });
 }
 
@@ -827,14 +888,24 @@ void MujocoSimulation::shutdown()
   {
     sim_->exitrequest.store(true);
     sim_->run = false;
+    if (!headless_)
+    {
+      // RenderLoop may be blocked waiting for a GLFW event. Wake it so it can
+      // observe exitrequest before this thread joins the UI worker.
+      glfwPostEmptyEvent();
+    }
 
     if (physics_thread_.joinable())
     {
+      RCLCPP_INFO(get_logger(), "Waiting for MuJoCo physics thread to stop...");
       physics_thread_.join();
+      RCLCPP_INFO(get_logger(), "MuJoCo physics thread stopped.");
     }
     if (ui_thread_.joinable())
     {
+      RCLCPP_INFO(get_logger(), "Waiting for MuJoCo UI thread to stop...");
       ui_thread_.join();
+      RCLCPP_INFO(get_logger(), "MuJoCo UI thread stopped.");
     }
   }
 }

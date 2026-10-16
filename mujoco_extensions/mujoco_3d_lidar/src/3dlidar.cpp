@@ -332,12 +332,17 @@ void Lidar::Raycast(const mjModel* m, mjData* d, const mjtNum* rotated_vecs, mjt
 
   mjtByte* geom_group = nullptr;
   mjtByte flg_static = -1;
-  int body_exclude = -1;
+  // Do not let a LiDAR ray immediately collide with the chassis or its own
+  // mounting structure.  MuJoCo's ray API excludes the selected body and all
+  // of its descendants, while keeping the static world and other robots.
+  const int body_exclude = m->site_bodyid[site_id_];
 
 #if (mjVERSION_HEADER >= 3005000)
-  int* geomid = nullptr;
-  mj_multiRay(m, d, site_pos, rotated_vecs, geom_group, flg_static, body_exclude, geomid, output, NULL, dimension_,
-              max_range_);
+  // MuJoCo 3.12's batched raycaster needs a writable geometry-id buffer in
+  // practice.  Passing nullptr is documented as optional but yields no
+  // distances for this extension on the bundled vendor build.
+  mj_multiRay(m, d, site_pos, rotated_vecs, geom_group, flg_static, body_exclude, geomid_.data(), output, NULL,
+              dimension_, max_range_);
 #elif (mjVERSION_HEADER == 340)
   mj_multiRay(m, d, site_pos, rotated_vecs, geom_group, flg_static, body_exclude, geomid_.data(), output, dimension_,
               max_range_);

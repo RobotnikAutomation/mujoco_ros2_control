@@ -81,11 +81,19 @@ Note that any number of cameras can be configured in the plugin configuration.
       type: "mujoco_ros2_control_plugins/CameraPlugin"
       # Note all cameras are published at the same rate
       camera_publish_rate: 5.0
+      # Optional; force a surfaceless context instead of a hidden GLFW window.
+      force_egl: false
+      # If the MuJoCo viewer owns GLFW, let its glfwTerminate() release the
+      # already-stopped offscreen window to avoid cross-thread teardown.
+      defer_glfw_cleanup: false
       camera:
         frame_name: camera_color_optical_frame
         info_topic: /camera_topic/color/camera_info
         image_topic: /camera_topic/color/image_raw
         depth_topic: /camera_topic/aligned_depth_to_color/image_raw
+        # Optional; defaults to true. Disable for RGB-only cameras to avoid
+        # rendering and transporting an unused depth image.
+        publish_depth: true
 
 
 .. note::
@@ -97,7 +105,9 @@ Headless Rendering
 ^^^^^^^^^^^^^^^^^^
 
 Camera rendering is supported in headless environments (without a display).
-The system automatically detects whether a display is available:
+The system automatically detects whether a display is available. Set
+``force_egl: true`` to guarantee surfaceless rendering and to avoid sharing
+GLFW state with the interactive MuJoCo viewer:
 
 * With display: Uses GLFW for OpenGL context creation (default behavior)
 * Without display: Falls back to EGL for GPU-accelerated headless rendering
@@ -562,6 +572,22 @@ RangefinderLidarPlugin
    This plugin is included to support legacy implementations of rangefinder based lidar sensors.
    We do not recommend using this, and instead would direct users to the 3d lidar plugin for improved
    features and performance.
+
+ImuPlugin
+~~~~~~~~~
+
+Publishes one MuJoCo ``framequat``/``gyro``/``accelerometer`` sensor triplet as a
+``sensor_msgs/Imu`` message. The three MJCF sensors must share the configured base name and
+use the suffixes ``_quat``, ``_gyro`` and ``_accel``. Messages use sensor-data QoS.
+
+.. code-block:: yaml
+
+   imu:
+     type: "mujoco_ros2_control_plugins/ImuPlugin"
+     sensor_name: robot_imu
+     frame_name: robot/imu_link
+     topic: /robot/imu/data
+     publish_rate: 100.0
 
 MuJoCo 3D Lidar Plugin
 ~~~~~~~~~~~~~~~~~~~~~~

@@ -255,8 +255,8 @@ bool Mujoco3dLidarPlugin::register_sensor(const mjModel* model, int sensor_idx)
     lidar_config.point_cloud_msg.data.resize(lidar_config.point_cloud_msg.row_step *
                                              lidar_config.point_cloud_msg.height);
 
-    lidar_config.pointcloud_pub_raw =
-        node_->create_publisher<sensor_msgs::msg::PointCloud2>(lidar_config.lidar_topic, 1);
+    lidar_config.pointcloud_pub_raw = node_->create_publisher<sensor_msgs::msg::PointCloud2>(
+        lidar_config.lidar_topic, rclcpp::SensorDataQoS().keep_last(5));
     lidar_config.pointcloud_pub = std::make_unique<realtime_tools::RealtimePublisher<sensor_msgs::msg::PointCloud2>>(
         lidar_config.pointcloud_pub_raw);
   }
@@ -276,7 +276,8 @@ bool Mujoco3dLidarPlugin::register_sensor(const mjModel* model, int sensor_idx)
     lidar_config.laser_scan_msg.ranges.resize(lidar_config.resolution[0] * lidar_config.resolution[1]);
     lidar_config.laser_scan_msg.intensities.resize(0);
 
-    lidar_config.scan_pub_raw = node_->create_publisher<sensor_msgs::msg::LaserScan>(lidar_config.lidar_topic, 1);
+    lidar_config.scan_pub_raw = node_->create_publisher<sensor_msgs::msg::LaserScan>(
+        lidar_config.lidar_topic, rclcpp::SensorDataQoS().keep_last(5));
     lidar_config.scan_pub =
         std::make_unique<realtime_tools::RealtimePublisher<sensor_msgs::msg::LaserScan>>(lidar_config.scan_pub_raw);
   }

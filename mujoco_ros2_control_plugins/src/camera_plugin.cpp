@@ -49,15 +49,32 @@ bool CameraPlugin::init(rclcpp::Node::SharedPtr node, const mjModel* model, mjDa
     return true;
   }
 
-  // Start the rendering thread process
-  // Try GLFW first, fall back to EGL for headless environments
-  if (glfw_init_fn())
+  // Start the rendering thread process. A dedicated EGL context avoids
+  // sharing GLFW's global lifetime with the interactive MuJoCo viewer and is
+  // also the preferred path for genuinely headless rendering.
+  const std::string force_egl_param = "mujoco_plugins." + node_->get_sub_namespace() + ".force_egl";
+  if (!node_->has_parameter(force_egl_param))
+  {
+    node_->declare_parameter(force_egl_param, false);
+  }
+  const bool force_egl = node_->get_parameter(force_egl_param).as_bool();
+  const std::string defer_cleanup_param =
+      "mujoco_plugins." + node_->get_sub_namespace() + ".defer_glfw_cleanup";
+  if (!node_->has_parameter(defer_cleanup_param))
+  {
+    node_->declare_parameter(defer_cleanup_param, false);
+  }
+  defer_glfw_cleanup_ = node_->get_parameter(defer_cleanup_param).as_bool();
+  if (!force_egl && glfw_init_fn())
   {
     use_egl_ = false;
   }
   else
   {
-    RCLCPP_WARN(node_->get_logger(), "Failed to initialize GLFW. Attempting EGL for headless rendering.");
+    if (!force_egl)
+    {
+      RCLCPP_WARN(node_->get_logger(), "Failed to initialize GLFW. Attempting EGL for headless rendering.");
+    }
     use_egl_ = true;
   }
   rendering_thread_ = std::thread(&CameraPlugin::update_loop, this);
@@ -211,6 +228,13 @@ bool CameraPlugin::register_cameras()
     }
     camera.frame_name = node_->get_parameter(frame_param).as_string();
 
+    const std::string publish_depth_param = param_ns + "publish_depth";
+    if (!node_->has_parameter(publish_depth_param))
+    {
+      node_->declare_parameter(publish_depth_param, true);
+    }
+    camera.publish_depth = node_->get_parameter(publish_depth_param).as_bool();
+
     if (!node_->has_parameter(param_ns + "info_topic"))
     {
       node_->declare_parameter(param_ns + "info_topic", camera.name + "/camera_info");
@@ -251,9 +275,18 @@ bool CameraPlugin::register_cameras()
     }
 
     // Configure publishers and services
-    camera.camera_info_pub = node_->create_publisher<sensor_msgs::msg::CameraInfo>(camera.info_topic, 1);
-    camera.image_pub = node_->create_publisher<sensor_msgs::msg::Image>(camera.image_topic, 1);
-    camera.depth_image_pub = node_->create_publisher<sensor_msgs::msg::Image>(camera.depth_topic, 1);
+    // Sensor streams use the ROS sensor-data contract: best effort, volatile,
+    // keep-last. A depth of five matches the canonical benchmark profile while
+    // avoiding back-pressure from slow monitoring subscribers.
+    const auto sensor_qos = rclcpp::SensorDataQoS().keep_last(5);
+    camera.camera_info_pub =
+        node_->create_publisher<sensor_msgs::msg::CameraInfo>(camera.info_topic, sensor_qos);
+    camera.image_pub = node_->create_publisher<sensor_msgs::msg::Image>(camera.image_topic, sensor_qos);
+    if (camera.publish_depth)
+    {
+      camera.depth_image_pub =
+          node_->create_publisher<sensor_msgs::msg::Image>(camera.depth_topic, sensor_qos);
+    }
     if (camera.policy == CameraPolicy::POLLED)
     {
       camera.trigger_service = node_->create_service<std_srvs::srv::Trigger>(
@@ -275,12 +308,15 @@ bool CameraPlugin::register_cameras()
 
     // Depth image data
     camera.depth_image.header.frame_id = camera.frame_name;
-    camera.depth_buffer.resize(camera.width * camera.height);
-    camera.depth_image.data.resize(camera.width * camera.height * sizeof(float));
-    camera.depth_image.width = camera.width;
-    camera.depth_image.height = camera.height;
-    camera.depth_image.step = camera.width * sizeof(float);
-    camera.depth_image.encoding = sensor_msgs::image_encodings::TYPE_32FC1;
+    if (camera.publish_depth)
+    {
+      camera.depth_buffer.resize(camera.width * camera.height);
+      camera.depth_image.data.resize(camera.width * camera.height * sizeof(float));
+      camera.depth_image.width = camera.width;
+      camera.depth_image.height = camera.height;
+      camera.depth_image.step = camera.width * sizeof(float);
+      camera.depth_image.encoding = sensor_msgs::image_encodings::TYPE_32FC1;
+    }
 
     // Camera info
     camera.camera_info.header.frame_id = camera.frame_name;
@@ -314,6 +350,7 @@ bool CameraPlugin::register_cameras()
 
 void CameraPlugin::close()
 {
+  RCLCPP_INFO(node_->get_logger(), "Stopping camera rendering loop...");
   {
     std::lock_guard<std::mutex> lock(data_mutex_);
     stop_requested_ = true;
@@ -324,6 +361,7 @@ void CameraPlugin::close()
   {
     rendering_thread_.join();
   }
+  RCLCPP_INFO(node_->get_logger(), "Camera rendering loop stopped.");
 }
 
 bool CameraPlugin::init_egl_context()
@@ -525,19 +563,29 @@ void CameraPlugin::update_loop()
     update_cameras();
   }
   publish_images_ = false;
+  RCLCPP_INFO(node_->get_logger(), "Camera rendering worker is releasing resources.");
 
-  mjv_freeScene(&mjv_scn_);
-  mjr_freeContext(&mjr_con_);
-  mj_deleteData(mj_camera_data_);
+  // In interactive mode the MuJoCo viewer owns GLFW's process-global
+  // lifetime. Calling any MuJoCo/OpenGL teardown from this worker while the
+  // viewer context is still alive can crash libGLdispatch. The process exits
+  // immediately after plugin cleanup, so defer all worker-owned render
+  // resources to process teardown in that mode.
+  if (!defer_glfw_cleanup_)
+  {
+    mjv_freeScene(&mjv_scn_);
+    mjr_freeContext(&mjr_con_);
+    mj_deleteData(mj_camera_data_);
+  }
 
   if (use_egl_)
   {
     cleanup_egl_context();
   }
-  else if (window)
+  else if (window && !defer_glfw_cleanup_)
   {
     glfwDestroyWindow(window);
   }
+  RCLCPP_INFO(node_->get_logger(), "Camera rendering worker exited.");
 }
 
 void CameraPlugin::update_cameras()
@@ -583,19 +631,23 @@ void CameraPlugin::render_and_publish_camera(CameraData& camera, const rclcpp::T
   mjr_render(camera.viewport, &mjv_scn_, &mjr_con_);
 
   // Copy image into relevant buffers
-  mjr_readPixels(camera.image_buffer.data(), camera.depth_buffer.data(), camera.viewport, &mjr_con_);
+  mjr_readPixels(camera.image_buffer.data(), camera.publish_depth ? camera.depth_buffer.data() : nullptr,
+                 camera.viewport, &mjr_con_);
 
   // Step 2: Adjust the images and copy depth data.
   // Fix non-linear depth buffer and flip it vertically (OpenGL's origin is the bottom left)
   // https://github.com/google-deepmind/mujoco/blob/3.4.0/python/mujoco/renderer.py#L190
-  auto* depth_out = reinterpret_cast<float*>(camera.depth_image.data.data());
-  for (uint32_t h = 0; h < camera.height; ++h)
+  if (camera.publish_depth)
   {
-    const float* src_row = camera.depth_buffer.data() + static_cast<size_t>(h) * camera.width;
-    float* dst_row = depth_out + static_cast<size_t>(camera.height - 1 - h) * camera.width;
-    for (uint32_t w = 0; w < camera.width; ++w)
+    auto* depth_out = reinterpret_cast<float*>(camera.depth_image.data.data());
+    for (uint32_t h = 0; h < camera.height; ++h)
     {
-      dst_row[w] = camera_near_distance_ / (1.0f - src_row[w] * camera_depth_scale_);
+      const float* src_row = camera.depth_buffer.data() + static_cast<size_t>(h) * camera.width;
+      float* dst_row = depth_out + static_cast<size_t>(camera.height - 1 - h) * camera.width;
+      for (uint32_t w = 0; w < camera.width; ++w)
+      {
+        dst_row[w] = camera_near_distance_ / (1.0f - src_row[w] * camera_depth_scale_);
+      }
     }
   }
 
@@ -610,11 +662,17 @@ void CameraPlugin::render_and_publish_camera(CameraData& camera, const rclcpp::T
 
   // Step 3: Publish the images and camera info.
   camera.image.header.stamp = stamp;
-  camera.depth_image.header.stamp = stamp;
+  if (camera.publish_depth)
+  {
+    camera.depth_image.header.stamp = stamp;
+  }
   camera.camera_info.header.stamp = stamp;
 
   camera.image_pub->publish(camera.image);
-  camera.depth_image_pub->publish(camera.depth_image);
+  if (camera.publish_depth)
+  {
+    camera.depth_image_pub->publish(camera.depth_image);
+  }
   camera.camera_info_pub->publish(camera.camera_info);
 }
 

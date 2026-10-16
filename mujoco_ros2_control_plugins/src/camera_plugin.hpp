@@ -78,6 +78,7 @@ struct CameraData
   // Set when this camera is selected to render on the next pass and is waiting
   // for the rendering thread to consume it, then clear it when rendering occurs.
   bool render_pending{ false };
+  bool publish_depth{ true };
 
   mjvCamera mjv_cam;
   mjrRect viewport;
@@ -272,6 +273,7 @@ private:
   EGLContext egl_context_{ EGL_NO_CONTEXT };
   EGLSurface egl_surface_{ EGL_NO_SURFACE };
   bool use_egl_{ false };
+  bool defer_glfw_cleanup_{ false };
 
   /**
    * @brief Initializes EGL context for headless rendering.
